@@ -18,6 +18,7 @@
 */
 
 #include "freezefile.h"
+#include "blake2.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -122,12 +123,6 @@ static int ctx_get_file_id(ctx *c, const char *path){
 
 #define MAX_CHUNK_SIZE 8000
 
-static int handle_chunk(unsigned int sequence, unsigned char *data, int data_len, void *ptr){
-  ctx *c = (ctx *)ptr;
-  printf("Got a chunk of length %d\n", data_len);
-  return 0;
-}
-
 static int exec_simple(ctx *c, sqlite3_stmt *stmt){
   int err;
   if( !stmt ){
@@ -153,6 +148,21 @@ static int ctx_rollback(ctx *c){
 }
 static int ctx_commit(ctx *c){
   return exec_simple(c, c->commit);
+}
+
+static int handle_chunk(unsigned int sequence, unsigned char *data, int data_len, void *ptr){
+  ctx *c = (ctx *)ptr;
+  unsigned char hash[32];
+  if( blake2b(hash, data, NULL, 32, (uint64_t)data_len, 0) ) return 1;
+  
+  printf("Chunk: len=%d, hash=",data_len);
+  int i;
+  for( i=0; i<32; i++ ){
+    printf("%02x", hash[i]);
+  }
+  printf("\n");
+  
+  return 0;
 }
 
 int ctx_ingest(ctx *c, const char *path){

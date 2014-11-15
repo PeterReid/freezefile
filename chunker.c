@@ -48,7 +48,6 @@ int file_to_chunks(
   int (*handle_chunk)(unsigned int sequence, unsigned char *data, int data_len, void *ptr),
   void *ptr
 ){
-  printf("Beginning ingestion of %s\n", path);
   /* TODO: handle UTF8 */
   FILE *f = fopen(path, "r");
   if( !f ) return 1;

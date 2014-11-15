@@ -166,9 +166,7 @@ static int handle_chunk(unsigned int sequence, unsigned char *data, int data_len
 }
 
 int ctx_ingest(ctx *c, const char *path){
-  printf("Beginning\n");
   if( ctx_begin_transaction(c) ) return 1;
-  printf("Begat\n");
   int file_id = ctx_get_file_id(c, path);
   if( file_id==0 ) goto error_out;
   
@@ -178,7 +176,6 @@ int ctx_ingest(ctx *c, const char *path){
     goto error_out;
   }
   
-  printf("Chunking...\n");
   if( file_to_chunks(path, chunk_buf, MAX_CHUNK_SIZE, handle_chunk, c) ){
     ctx_errmsg(c, sqlite3_mprintf("Error reading \"%s\"", path));
   }

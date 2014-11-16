@@ -37,6 +37,8 @@ typedef struct ctx {
   sqlite3_stmt *insert_segment;
   sqlite3_stmt *insert_revision;
 
+  sqlite3_stmt *select_revision_chunks;
+
   int errtype; /* A  CTX_ERR_* constant */
   char *errmsg; /* Allocated with sqlite3_mprintf */
   const char *err_context;
@@ -53,6 +55,11 @@ void ctx_errtype(ctx *ctx, int errtype);
  * at path.
  */
 int ctx_ingest(ctx *c, const char *path);
+
+/*
+ * Output a stored file.
+ */
+int ctx_spew(ctx *c, const char *dest_path, sqlite3_int64 revision_id);
 
 int file_to_chunks(
   const char *path,

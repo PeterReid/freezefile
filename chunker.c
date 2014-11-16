@@ -49,7 +49,7 @@ int file_to_chunks(
   void *ptr
 ){
   /* TODO: handle UTF8 */
-  FILE *f = fopen(path, "r");
+  FILE *f = fopen(path, "rb");
   if( !f ) return 1;
   
   uint64_t byte_hashes[256];

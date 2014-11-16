@@ -124,6 +124,10 @@ int ctx_init(ctx *c, const char *path){
    || do_prepare("INSERT INTO chunk(hash, contents) VALUES (?, ?)", c, &c->insert_chunk)
    || do_prepare("INSERT INTO segment(revision_id, sequence, chunk_id) VALUES (?, ?, ?)", c, &c->insert_segment)
    || do_prepare("INSERT INTO revision(file_id, time) VALUES (?, datetime('now'))", c, &c->insert_revision)
+   || do_prepare("SELECT contents FROM chunk"
+                 " INNER JOIN segment USING (chunk_id)"
+                 " WHERE revision_id = ?"
+                 " ORDER BY sequence ASC", c, &c->select_revision_chunks)
   ){
     return 1;
   }
@@ -317,4 +321,36 @@ int ctx_ingest(ctx *c, const char *path){
 error_out:
   ctx_rollback(c);
   return 1;
+}
+
+int ctx_spew(ctx *c, const char *dest_path, sqlite3_int64 revision_id){
+  /* TODO: Consider encoding of dest_path */
+  FILE *f = fopen(dest_path, "wb+");
+  if( !f ){
+    ctx_errmsg(c, sqlite3_mprintf("Could not write to %s", dest_path));
+    return 1;
+  }
+  
+  if( ctx_collect_err(c, sqlite3_reset(c->select_revision_chunks)) ) goto out;
+  if( ctx_collect_err(c, sqlite3_bind_int64(c->select_revision_chunks, 1, revision_id)) ) goto out;
+  int step_result;
+  while( 0==ctx_collect_err(c, step_result=sqlite3_step(c->select_revision_chunks)) && step_result==SQLITE_ROW) {
+    const void *contents = sqlite3_column_blob(c->select_revision_chunks, 0);
+    int contents_len = sqlite3_column_bytes(c->select_revision_chunks, 0);
+    if( contents==NULL || contents_len<=0){
+      ctx_errmsg(c, sqlite3_mprintf("Got an invalid file chunk while restoring a revision"));
+      goto out;
+    }
+    size_t written = fwrite(contents, 1, (unsigned int)contents_len, f);
+    if( written!=(unsigned int)contents_len ){
+      ctx_errmsg(c, sqlite3_mprintf("Error writing to %s", dest_path));
+      goto out;
+    }
+  }
+  
+  out:
+  
+  ctx_collect_err(c, sqlite3_clear_bindings(c->select_revision_chunks));
+  fclose(f);
+  return c->errtype != CTX_ERR_NONE;
 }

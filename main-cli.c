@@ -24,7 +24,9 @@ int main(int argc, char *args[]){
   ctx c;
   if (ctx_init(&c, "db.freezefile")) goto out;
   
-  if (ctx_ingest(&c, "test.txt")) goto out;
+  //if (ctx_ingest(&c, "test.txt")) goto out;
+  
+  if( ctx_spew(&c, "test2.txt", 2) ) goto out;
   
 out:
   if( c.errmsg ){

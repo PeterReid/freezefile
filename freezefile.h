@@ -25,13 +25,24 @@
 
 typedef struct ctx {
   sqlite3 *db;
-  sqlite3_stmt *insert_chunk;
+  
   sqlite3_stmt *begin_transaction;
   sqlite3_stmt *rollback;
   sqlite3_stmt *commit;
+  
+  sqlite3_stmt *lookup_file_id;
+  sqlite3_stmt *insert_file;
+  sqlite3_stmt *find_chunk;
+  sqlite3_stmt *insert_chunk;
+  sqlite3_stmt *insert_segment;
+  sqlite3_stmt *insert_revision;
+
   int errtype; /* A  CTX_ERR_* constant */
   char *errmsg; /* Allocated with sqlite3_mprintf */
+  const char *err_context;
 } ctx;
+
+#define HASH_LENGTH 32
 
 int ctx_init(ctx *ctx, const char *path);
 int ctx_close(ctx *ctx);

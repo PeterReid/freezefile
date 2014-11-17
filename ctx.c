@@ -31,7 +31,7 @@ static int do_exec(const char *sql, ctx *c){
                                "Technical details: While executing \"\n"
                                "%s"
                                "\n\", the following error was encountered:\n"
-                               "%s", sql, *sql_errmsg));
+                               "%s", sql, sql_errmsg));
   sqlite3_free(sql_errmsg);
   return 1;
 }
@@ -74,11 +74,20 @@ int ctx_init(ctx *c, const char *path){
   }
   
   sqlite3_busy_timeout(c->db, 5000);
-  
+  printf("Creating\n");
   if( do_exec("CREATE TABLE IF NOT EXISTS chunk"
               "(chunk_id INTEGER PRIMARY KEY AUTOINCREMENT"
               ",hash BLOB"
-              ",contents BLOB"
+              ",body BLOB"
+              ")", c)
+   || do_exec("CREATE TABLE IF NOT EXISTS snapshot"
+              "(snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT"
+              ",time TEXT"
+              ",note TEXT"
+              ")", c)
+   || do_exec("CREATE TABLE IF NOT EXISTS content"
+              "(content_id INTEGER PRIMARY KEY AUTOINCREMENT"
+              ",hash BLOB"
               ")", c)
    || do_exec("CREATE TABLE IF NOT EXISTS file"
               "(file_id INTEGER PRIMARY KEY AUTOINCREMENT"
@@ -87,16 +96,18 @@ int ctx_init(ctx *c, const char *path){
    || do_exec("CREATE TABLE IF NOT EXISTS revision"
               "(revision_id INTEGER PRIMARY KEY AUTOINCREMENT"
               ",file_id INT"
-              ",counter INT"
-              ",time TEXT"
+              ",content_id INT"
+              ",snapshot_id INT"
               ",FOREIGN KEY(file_id) REFERENCES file(file_id)"
+              ",FOREIGN KEY(content_id) REFERENCES file(content_id)"
+              ",FOREIGN KEY(snapshot_id) REFERENCES file(snapshot_id)"
               ")", c)
    || do_exec("CREATE TABLE IF NOT EXISTS segment"
               "(segment_id INTEGER PRIMARY KEY AUTOINCREMENT"
-              ",revision_id INT NOT NULL"
+              ",content_id INT NOT NULL"
               ",sequence INT NOT NULL"
               ",chunk_id INT NOT NULL"
-              ",FOREIGN KEY(revision_id) REFERENCES revision(revision_id)"
+              ",FOREIGN KEY(content_id) REFERENCES revision(content_id)"
               ",FOREIGN KEY(chunk_id) REFERENCES chunk(chunk_id)"
               ")", c)
    || do_exec("CREATE TABLE IF NOT EXISTS segment"
@@ -107,10 +118,6 @@ int ctx_init(ctx *c, const char *path){
               ",FOREIGN KEY(revision_id) REFERENCES revision(revision_id)"
               ",FOREIGN KEY(chunk_id) REFERENCES chunk(chunk_id)"
               ")", c)
-   || do_exec("CREATE TRIGGER IF NOT EXISTS revision_autocounter"
-              "AFTER INSERT ON revision BEGIN "
-              "UPDATE revision SET counter = 1+IFNULL((SELECT MAX(counter) FROM revision WHERE revision.file_id = NEW.file_id), 0) WHERE revision_id = NEW.revision_id;"
-              "END", c)
   ){
     return 1;
   }
@@ -118,16 +125,19 @@ int ctx_init(ctx *c, const char *path){
   if( do_prepare("BEGIN TRANSACTION", c, &c->begin_transaction)
    || do_prepare("ROLLBACK", c, &c->rollback)
    || do_prepare("COMMIT", c, &c->commit)
+   || do_prepare("INSERT INTO snapshot(time, note) VALUES (datetime('now'), ?)", c, &c->insert_snapshot)
    || do_prepare("SELECT file_id FROM file WHERE path = ?", c, &c->lookup_file_id)
    || do_prepare("INSERT INTO file(path) VALUES (?)", c, &c->insert_file)
    || do_prepare("SELECT chunk_id FROM chunk WHERE hash = ?", c, &c->find_chunk)
-   || do_prepare("INSERT INTO chunk(hash, contents) VALUES (?, ?)", c, &c->insert_chunk)
-   || do_prepare("INSERT INTO segment(revision_id, sequence, chunk_id) VALUES (?, ?, ?)", c, &c->insert_segment)
-   || do_prepare("INSERT INTO revision(file_id, time) VALUES (?, datetime('now'))", c, &c->insert_revision)
-   || do_prepare("SELECT contents FROM chunk"
+   || do_prepare("INSERT INTO chunk(hash, body) VALUES (?, ?)", c, &c->insert_chunk)
+   || do_prepare("INSERT INTO segment(content_id, sequence, chunk_id) VALUES (?, ?, ?)", c, &c->insert_segment)
+   || do_prepare("INSERT INTO revision(file_id, snapshot_id, content_id) VALUES (?, ?, ?)", c, &c->insert_revision)
+   || do_prepare("SELECT body FROM chunk"
                  " INNER JOIN segment USING (chunk_id)"
-                 " WHERE revision_id = ?"
+                 " WHERE content_id = (SELECT content_id FROM revision WHERE revision_id = ?)"
                  " ORDER BY sequence ASC", c, &c->select_revision_chunks)
+   || do_prepare("SELECT content_id FROM content WHERE hash = ?", c, &c->select_content_id)
+   || do_prepare("INSERT INTO content(hash) VALUES (?)", c, &c->insert_content)
   ){
     return 1;
   }
@@ -225,7 +235,6 @@ sqlite3_int64 ctx_store_chunk(ctx *c, unsigned char *hash, unsigned char *data, 
   
   sqlite3_int64 id = 0;
   if( ctx_collect_err(c, sqlite3_reset(c->insert_chunk)) ) goto out;
-  if( ctx_collect_err(c, sqlite3_reset(c->insert_chunk)) ) goto out;
   if( ctx_collect_err(c, sqlite3_bind_blob(c->insert_chunk, 1, hash, HASH_LENGTH, SQLITE_STATIC)) ) goto out;
   if( ctx_collect_err(c, sqlite3_bind_blob(c->insert_chunk, 2, data, data_len, SQLITE_STATIC)) ) goto out;
   if( ctx_collect_err(c, sqlite3_step(c->insert_chunk)) ) goto out;
@@ -236,13 +245,12 @@ sqlite3_int64 ctx_store_chunk(ctx *c, unsigned char *hash, unsigned char *data, 
   return id;
 }
 
-sqlite3_int64 ctx_store_segment(ctx *c, sqlite3_int64 revision_id, unsigned int sequence, sqlite3_int64 chunk_id){
+sqlite3_int64 ctx_store_segment(ctx *c, sqlite3_int64 content_id, unsigned int sequence, sqlite3_int64 chunk_id){
   c->err_context = "storing a segment";
   
   sqlite3_int64 id = 0;
   if( ctx_collect_err(c, sqlite3_reset(c->insert_segment)) ) goto out;
-  if( ctx_collect_err(c, sqlite3_reset(c->insert_segment)) ) goto out;
-  if( ctx_collect_err(c, sqlite3_bind_int64(c->insert_segment, 1, revision_id)) ) goto out;
+  if( ctx_collect_err(c, sqlite3_bind_int64(c->insert_segment, 1, content_id)) ) goto out;
   if( ctx_collect_err(c, sqlite3_bind_int64(c->insert_segment, 2, (sqlite3_int64)sequence)) ) goto out;
   if( ctx_collect_err(c, sqlite3_bind_int64(c->insert_segment, 3, chunk_id)) ) goto out;
   if( ctx_collect_err(c, sqlite3_step(c->insert_segment)) ) goto out;
@@ -253,13 +261,44 @@ sqlite3_int64 ctx_store_segment(ctx *c, sqlite3_int64 revision_id, unsigned int 
   return id;
 }
 
-sqlite3_int64 ctx_add_revision(ctx *c, sqlite3_int64 file_id){
+sqlite3_int64 ctx_get_content_id(ctx *c, unsigned char *hash){
+  c->err_context = "finding stored file contents";
+  sqlite3_int64 id = 0;
+  if( ctx_collect_err(c, sqlite3_reset(c->select_content_id)) ) goto out;
+  if( ctx_collect_err(c, sqlite3_bind_blob(c->select_content_id, 1, hash, HASH_LENGTH, SQLITE_STATIC)) ) goto out;
+  int step_result;
+  if( ctx_collect_err(c, step_result=sqlite3_step(c->select_content_id)) ) goto out;
+  if( step_result==SQLITE_ROW ){
+    id = sqlite3_column_int64(c->select_content_id, 0);
+  }
+  
+  out:
+  sqlite3_clear_bindings(c->select_content_id);
+  return id;
+}
+
+sqlite3_int64 ctx_insert_content(ctx *c, unsigned char *hash){
+  c->err_context = "storing a data chunk";
+  
+  sqlite3_int64 id = 0;
+  if( ctx_collect_err(c, sqlite3_reset(c->insert_content)) ) goto out;
+  if( ctx_collect_err(c, sqlite3_bind_blob(c->insert_content, 1, hash, HASH_LENGTH, SQLITE_STATIC)) ) goto out;
+  if( ctx_collect_err(c, sqlite3_step(c->insert_content)) ) goto out;
+  id = sqlite3_last_insert_rowid(c->db);
+  
+  out:
+  ctx_collect_err(c, sqlite3_clear_bindings(c->insert_content));
+  return id;
+}
+sqlite3_int64 ctx_add_revision(ctx *c, sqlite3_int64 file_id, sqlite3_int64 content_id){
   c->err_context = "adding a revision";
   
   sqlite3_int64 id = 0;
   if( ctx_collect_err(c, sqlite3_reset(c->insert_revision)) ) goto out;
   if( ctx_collect_err(c, sqlite3_reset(c->insert_revision)) ) goto out;
   if( ctx_collect_err(c, sqlite3_bind_int64(c->insert_revision, 1, file_id)) ) goto out;
+  if( ctx_collect_err(c, sqlite3_bind_int64(c->insert_revision, 2, c->creating_snapshot_id)) ) goto out;
+  if( ctx_collect_err(c, sqlite3_bind_int64(c->insert_revision, 3, content_id)) ) goto out;
   if( ctx_collect_err(c, sqlite3_step(c->insert_revision)) ) goto out;
   id = sqlite3_last_insert_rowid(c->db);
   
@@ -270,7 +309,7 @@ sqlite3_int64 ctx_add_revision(ctx *c, sqlite3_int64 file_id){
 
 typedef struct handler_ctx {
   ctx *c;
-  int64_t revision_id;
+  int64_t content_id;
 } handler_ctx;
 
 static int handle_chunk(unsigned int sequence, unsigned char *data, int data_len, void *ptr){
@@ -291,36 +330,82 @@ static int handle_chunk(unsigned int sequence, unsigned char *data, int data_len
     chunk_id = ctx_store_chunk(c, hash, data, data_len);
     if( chunk_id==0 ) return 1;
   }
-  ctx_store_segment(c, info->revision_id, sequence, chunk_id);
+  ctx_store_segment(c, info->content_id, sequence, chunk_id);
   
   return 0;
 }
 
-int ctx_ingest(ctx *c, const char *path){
-  unsigned char *chunk_buf = (unsigned char *)malloc(MAX_CHUNK_SIZE);
-  if( !chunk_buf ){
-    ctx_errtype(c, CTX_ERR_NO_MEMORY);
-    return 1;
-  }
+sqlite_int64 ctx_ensure_content(ctx *c, FILE *f){
+  unsigned char hash[HASH_LENGTH];
+  /* This gets used for reading the file once to get the overall hash,
+  ** and then again to build chunks if we have a new hash. It is sized
+  ** for that second task.  */
+  unsigned char buf[MAX_CHUNK_SIZE];
   
-  if( ctx_begin_transaction(c) ) return 1;
-  int file_id = ctx_get_file_id(c, path);
-  int revision_id = ctx_add_revision(c, file_id);
-  if( file_id==0 ) goto error_out;
+  blake2b_state b;
+  blake2b_init(&b, HASH_LENGTH);
+  int len;
+  while( 0 < (len=fread(buf, 1, sizeof(buf), f)) ){
+    blake2b_update(&b, buf, len);
+  }
+  blake2b_final(&b, hash, HASH_LENGTH);
+  
+  sqlite_int64 content_id = ctx_get_content_id(c, hash);
+  printf("Got content id: %lld\n", content_id);
+  if( content_id ) return content_id;
+  
+  content_id = ctx_insert_content(c, hash);
   
   handler_ctx info;
   info.c = c;
-  info.revision_id = revision_id;
-  if( file_to_chunks(path, chunk_buf, MAX_CHUNK_SIZE, handle_chunk, &info) ){
-    ctx_errmsg(c, sqlite3_mprintf("Error reading \"%s\"", path));
+  info.content_id = content_id;
+  fseek(f, 0, SEEK_SET);
+  if( file_to_chunks(f, buf, MAX_CHUNK_SIZE, handle_chunk, &info) ){
+    ctx_errmsg(c, sqlite3_mprintf("Error reading file"));
+    return 0;
   }
   
-  ctx_commit(c);
+  return content_id;
+}
+
+int ctx_add_to_snapshot(ctx *c, const char *path, FILE *f){
+  printf("Adding to snapshot: %s\n", path);
+  int file_id = ctx_get_file_id(c, path);
+  if( file_id==0 ) goto error_out;
+  
+  int content_id = ctx_ensure_content(c, f);
+  if( content_id==0 ) goto error_out;
+  
+  int revision_id = ctx_add_revision(c, file_id, content_id);
+  if( file_id==0 ) goto error_out;
   
   return 0;
 error_out:
-  ctx_rollback(c);
   return 1;
+}
+
+int ctx_begin_snapshot(ctx *c, const char *note){
+  c->err_context = "beginning a snapshot";
+  c->creating_snapshot_id = 0;
+  
+  if( ctx_begin_transaction(c) ) goto out;
+  
+  if( ctx_collect_err(c, sqlite3_reset(c->insert_snapshot)) ) goto out;
+  if( ctx_collect_err(c, sqlite3_reset(c->insert_snapshot)) ) goto out;
+  if( ctx_collect_err(c, sqlite3_bind_text(c->insert_snapshot, 1, note, -1, SQLITE_STATIC)) ) goto out;
+  if( ctx_collect_err(c, sqlite3_step(c->insert_snapshot)) ) goto out;
+  c->creating_snapshot_id = sqlite3_last_insert_rowid(c->db);
+  
+  out:
+  ctx_collect_err(c, sqlite3_clear_bindings(c->insert_snapshot));
+}
+
+int ctx_finish_snapshot(ctx *c){
+  return ctx_commit(c);
+}
+
+int ctx_abort_snapshot(ctx *c){
+  return ctx_rollback(c);
 }
 
 int ctx_spew(ctx *c, const char *dest_path, sqlite3_int64 revision_id){

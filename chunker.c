@@ -42,16 +42,12 @@ static uint64_t window_hash(uint8_t *buf, unsigned int buf_begin, uint64_t *byte
 ** memmove change should fix that.
 */
 int file_to_chunks(
-  const char *path,
+  FILE *f,
   unsigned char *chunk_buf,
   unsigned int chunk_buf_len,
   int (*handle_chunk)(unsigned int sequence, unsigned char *data, int data_len, void *ptr),
   void *ptr
 ){
-  /* TODO: handle UTF8 */
-  FILE *f = fopen(path, "rb");
-  if( !f ) return 1;
-  
   uint64_t byte_hashes[256];
   byte_hashes[0] = 0xfbe8a26b6c81741eULL;
   int i;
@@ -75,6 +71,7 @@ int file_to_chunks(
       /* A short segment! We have no choice about placing the boundary. This ends now. */
       int err = handle_chunk(sequence, chunk_buf, chunk_buf_filled, ptr);
       if( err ) goto out;
+      chunk_buf_filled = 0;
     }else{
       unsigned int segment_length;
       /* We scan forward looking for a great segment end. */
